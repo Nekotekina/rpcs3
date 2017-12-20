@@ -662,7 +662,7 @@ void SPUThread::process_mfc_cmd()
 
 		if (raddr && raddr != ch_mfc_cmd.eal)
 		{
-			ch_event_stat |= SPU_EVENT_LR;
+			set_events(SPU_EVENT_LR);
 		}
 
 		const bool is_polling = false;// raddr == _addr && rtime == _time; // TODO
@@ -781,7 +781,7 @@ void SPUThread::process_mfc_cmd()
 
 		if (raddr && !result)
 		{
-			ch_event_stat |= SPU_EVENT_LR;
+			set_events(SPU_EVENT_LR);
 		}
 
 		raddr = 0;
@@ -791,8 +791,8 @@ void SPUThread::process_mfc_cmd()
 	{
 		if (raddr && ch_mfc_cmd.eal == raddr)
 		{
-			ch_event_stat |= SPU_EVENT_LR;
 			raddr = 0;
+			set_events(SPU_EVENT_LR);
 		}
 
 		auto& data = vm::ps3::_ref<decltype(rdata)>(ch_mfc_cmd.eal);
@@ -987,32 +987,30 @@ u32 SPUThread::get_events(bool waiting)
 	// Check reservation status and set SPU_EVENT_LR if lost
 	if (raddr && (vm::reservation_acquire(raddr, sizeof(rdata)) != rtime || rdata != vm::ps3::_ref<decltype(rdata)>(raddr)))
 	{
-		ch_event_stat |= SPU_EVENT_LR;
 		raddr = 0;
+		set_events(SPU_EVENT_LR);
 	}
 
 	// Simple polling or polling with atomically set/removed SPU_EVENT_WAITING flag
-	return !waiting ? ch_event_stat & ch_event_mask : ch_event_stat.atomic_op([&](u32& stat) -> u32
-	{
-		if (u32 res = stat & ch_event_mask)
-		{
-			stat &= ~SPU_EVENT_WAITING;
-			return res;
-		}
-
-		stat |= SPU_EVENT_WAITING;
-		return 0;
-	});
+	return !waiting ? ch_event_stat & ch_event_mask : ch_event_stat & SPU_EVENT_OCCUR != 0;
 }
 
 void SPUThread::set_events(u32 mask)
-{
-	// Set new events, get old event mask
-	const u32 old_stat = ch_event_stat.fetch_or(mask);
-
-	// Notify if some events were set
-	if (~old_stat & mask && old_stat & SPU_EVENT_WAITING && ch_event_stat & SPU_EVENT_WAITING)
+{	
+	// Assume: only one event is set at a time 
+	u32 counter = 0;
+	
+	if (mask & ~ch_event_stat)
 	{
+		if (ch_event_mask & mask )
+		{
+			if (ch_event_stat & SPU_EVENT_WAITING) 
+			{
+				ch_event_stat |= mask | SPU_EVENT_OCCUR;
+			}
+			else ch_event_stat |= mask | SPU_EVENT_AVAILABLE;
+		}
+		else ch_event_stat |= mask;
 		notify();
 	}
 }
@@ -1053,7 +1051,7 @@ u32 SPUThread::get_ch_count(u32 ch)
 	case SPU_RdSigNotify1:    return ch_snr1.get_count();
 	case SPU_RdSigNotify2:    return ch_snr2.get_count();
 	case MFC_RdAtomicStat:    return ch_atomic_stat.get_count();
-	case SPU_RdEventStat:     return get_events() != 0;
+	case SPU_RdEventStat:     return ch_event_stat & SPU_EVENT_AVAILABLE != 0;
 	case MFC_Cmd:             return std::max(16 - mfc_queue.size(), (u32)0);
 	}
 
@@ -1182,14 +1180,14 @@ bool SPUThread::get_ch_value(u32 ch, u32& out)
 
 	case SPU_RdEventStat:
 	{
-		u32 res = get_events();
-
-		if (res)
+		u32 res = get_events(false);
+		if (ch_event_stat & SPU_EVENT_AVAILABLE)
 		{
 			out = res;
+			ch_event_stat &= 0x1fffffff;
 			return true;
 		}
-
+		ch_event_stat |= SPU_EVENT_WAITING; 
 		vm::waiter waiter;
 
 		if (ch_event_mask & SPU_EVENT_LR)
@@ -1201,8 +1199,8 @@ bool SPUThread::get_ch_value(u32 ch, u32& out)
 			waiter.data = rdata.data();
 			waiter.init();
 		}
-
-		while (!(res = get_events(true)))
+		// Waits on SPU_EVENT_OCCUR to be set
+		while (get_events(true)) 
 		{
 			if (test(state & cpu_flag::stop))
 			{
@@ -1212,7 +1210,8 @@ bool SPUThread::get_ch_value(u32 ch, u32& out)
 			thread_ctrl::wait_for(100);
 		}
 
-		out = res;
+		ch_event_stat &= 0x1fffffff;
+		out = ch_event_stat & ch_event_mask;
 		return true;
 	}
 
@@ -1536,13 +1535,22 @@ bool SPUThread::set_ch_value(u32 ch, u32 value)
 
 	case SPU_WrEventMask:
 	{
+		value &= 0x1ffb;
+		
+		// Check if new old disabled pending events are now enabled
+		if (ch_event_stat & (value & ~ch_event_mask)) ch_event_stat |= SPU_EVENT_AVAILABLE;
+
 		ch_event_mask = value;
 		return true;
 	}
 
 	case SPU_WrEventAck:
 	{
+		value &= 0x1ffb;
 		ch_event_stat &= ~value;
+
+		// Check if enabled and pending events are still pending
+		if (ch_event_stat & ch_event_mask) ch_event_stat |= SPU_EVENT_AVAILABLE;
 
 		if (dec_state & dec_run) 
 		{

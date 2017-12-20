@@ -306,7 +306,7 @@ void spu_recompiler::CheckInterruptStatus(spu_opcode_t op)
 	{
 		c->lock().bts(SPU_OFF_8(interrupts_enabled), 0);
 		c->mov(*qw0, SPU_OFF_32(ch_event_stat));
-		c->and_(*qw0, SPU_OFF_32(ch_event_mask));
+		c->and_(*qw0, SPU_EVENT_AVAILABLE);
 		c->cmp(*qw0, 0);
 
 		asmjit::Label noInterrupt = c->newLabel();
@@ -1195,7 +1195,7 @@ void spu_recompiler::IRET(spu_opcode_t op)
 
 void spu_recompiler::BISLED(spu_opcode_t op)
 {
-	fmt::throw_exception("Unimplemented instruction" HERE);
+	InterpreterCall(op); //TODO
 }
 
 void spu_recompiler::HBR(spu_opcode_t op)

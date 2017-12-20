@@ -63,9 +63,9 @@ enum : u32
 	SPU_EVENT_SN = 0x2,    // MFC List Command stall-and-notify event
 	SPU_EVENT_TG = 0x1,    // MFC Tag Group status update event
 
-	SPU_EVENT_WAITING      = 0x80000000, // Originally unused, set when SPU thread starts waiting on ch_event_stat
-	//SPU_EVENT_AVAILABLE  = 0x40000000, // Originally unused, channel count of the SPU_RdEventStat channel
-	//SPU_EVENT_INTR_ENABLED = 0x20000000, // Originally unused, represents "SPU Interrupts Enabled" status
+	SPU_EVENT_WAITING   = 0x80000000, // Originally unused, set when SPU thread starts waiting on ch_event_stat
+	SPU_EVENT_AVAILABLE  = 0x40000000, // Originally unused, channel count of the SPU_RdEventStat channel
+	SPU_EVENT_OCCUR = 0x20000000, // Originally unused, sets when an event has occured while waiting on ch_event_stat
 };
 
 // SPU Class 0 Interrupts
