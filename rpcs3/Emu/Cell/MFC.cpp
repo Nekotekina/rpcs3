@@ -307,6 +307,37 @@ void mfc_thread::cpu_task()
 					no_updates = 0;
 				}
 			}
+ 		
+			if (spu.prxy_type)
+ 			{
+ 				// Mask incomplete transfers
+ 				u32 completed = spu.mfc_prxy_mask;
+ 
+ 				for (u32 i = 0; i < spu.mfc_proxy.size(); i++)
+ 				{
+ 					const auto& _cmd = spu.mfc_proxy[i];
+ 
+ 					if (_cmd.size)
+ 					{
+ 						if (spu.prxy_type == 1)
+ 						{
+ 							completed &= ~(1u << _cmd.tag);
+ 						}
+ 						else
+ 						{
+ 							completed = 0;
+ 							break;
+ 						}
+ 					}
+ 				}
+ 
+ 				if (completed && spu.prxy_type)
+ 				{
+					spu.prxy_type = 0;
+ 					spu.int_ctrl[2].set(SPU_INT2_STAT_DMA_TAG_GROUP_COMPLETION_INT);
+  					no_updates = 0;
+  				}
+  			}
 
 			test_state();
 		}
@@ -340,7 +371,7 @@ void mfc_thread::cpu_task()
 						}
 					}
 
-					if (spu.ch_tag_upd)
+					if (spu.ch_tag_upd || spu.prxy_type)
 					{
 						no_updates = 0;
 						break;
