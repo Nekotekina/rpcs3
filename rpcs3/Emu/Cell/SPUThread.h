@@ -142,6 +142,13 @@ enum : u32
 	RAW_SPU_PROB_OFFSET = 0x00040000,
 };
 
+enum : u32 //orginally unused.
+{ 
+	dec_msb = 1, // The most significant bit of the decrementer
+	dec_run = 2, // The state of the decrementer
+	dec_upd = 4, // Tells MFC to check the decrementer for an event
+};
+
 struct spu_channel_t
 {
 	struct alignas(8) sync_var_t
@@ -561,7 +568,8 @@ public:
 	atomic_t<bool> interrupts_enabled;
 
 	u64 ch_dec_start_timestamp; // timestamp of writing decrementer value
-	u32 ch_dec_value; // written decrementer value
+	u32 ch_dec_value; // written decrementer value and the decrementer value when it stops.
+	atomic_t<u32> dec_state; // contains various decrementer related contidions 
 
 	atomic_t<u32> run_ctrl; // SPU Run Control register (only provided to get latest data written)
 	atomic_t<u32> status; // SPU Status register
@@ -593,6 +601,7 @@ public:
 	u32 get_events(bool waiting = false);
 	void set_events(u32 mask);
 	u32 get_ch_count(u32 ch);
+	void decrementer_thread();
 	bool get_ch_value(u32 ch, u32& out);
 	bool set_ch_value(u32 ch, u32 value);
 	bool stop_and_signal(u32 code);

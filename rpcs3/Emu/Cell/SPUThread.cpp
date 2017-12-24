@@ -22,6 +22,7 @@
 #include <cfenv>
 #include <atomic>
 #include <thread>
+#include <chrono>
 
 const bool s_use_rtm = utils::has_rtm();
 
@@ -358,6 +359,7 @@ void SPUThread::cpu_init()
 
 	ch_dec_start_timestamp = get_timebased_time(); // ???
 	ch_dec_value = 0;
+	dec_state = 0;
 
 	run_ctrl = 0;
 	status = 0;
@@ -988,15 +990,6 @@ u32 SPUThread::get_events(bool waiting)
 		raddr = 0;
 	}
 
-	// SPU Decrementer Event
-	if (!ch_dec_value || (ch_dec_value - (get_timebased_time() - ch_dec_start_timestamp)) >> 31)
-	{
-		if ((ch_event_stat & SPU_EVENT_TM) == 0)
-		{
-			ch_event_stat |= SPU_EVENT_TM;
-		}
-	}
-
 	// Simple polling or polling with atomically set/removed SPU_EVENT_WAITING flag
 	return !waiting ? ch_event_stat & ch_event_mask : ch_event_stat.atomic_op([&](u32& stat) -> u32
 	{
@@ -1021,6 +1014,27 @@ void SPUThread::set_events(u32 mask)
 	{
 		notify();
 	}
+}
+
+void SPUThread::decrementer_thread()
+{
+	// SPU Decrementer Event
+	u32 current = ch_dec_value; 
+	do {
+		if (current > 20000000 /*second / 4*/) std::this_thread::sleep_for(std::chrono::milliseconds(200));
+		_mm_mfence();
+		
+		if ((current = ch_dec_value - (u32)(get_timebased_time() - ch_dec_start_timestamp)) >> 31)
+		{
+			if (dec_state == 0x6) // Run + upd and msb switched from 0 -> 1
+			{
+				set_events(SPU_EVENT_TM);
+				break;
+			}
+			dec_state |= dec_msb;
+		}
+		else dec_state &= ~dec_msb;
+	} while (dec_state & dec_upd || !test(state & cpu_flag::stop));
 }
 
 u32 SPUThread::get_ch_count(u32 ch)
@@ -1150,7 +1164,7 @@ bool SPUThread::get_ch_value(u32 ch, u32& out)
 
 	case SPU_RdDec:
 	{
-		out = ch_dec_value - (u32)(get_timebased_time() - ch_dec_start_timestamp);
+		out = dec_state & dec_run ? (ch_dec_value - (u32)(get_timebased_time() - ch_dec_start_timestamp)) : ch_dec_value;
 
 		//Polling: We might as well hint to the scheduler to slot in another thread since this one is counting down
 		if (g_cfg.core.spu_loop_detection && out > spu::scheduler::native_jiffy_duration_us)
@@ -1499,8 +1513,23 @@ bool SPUThread::set_ch_value(u32 ch, u32 value)
 
 	case SPU_WrDec:
 	{
-		ch_dec_start_timestamp = get_timebased_time();
-		ch_dec_value = value;
+		if ((value & ~(dec_state & dec_run ? (ch_dec_value - (u32)(get_timebased_time() - ch_dec_start_timestamp)) : ch_dec_value)) >> 31)
+		{
+			ch_dec_start_timestamp = get_timebased_time();
+			ch_dec_value = value;
+			dec_state = dec_msb + dec_run;
+			set_events(SPU_EVENT_TM);
+		}
+		else {
+			ch_dec_start_timestamp = get_timebased_time();
+			ch_dec_value = value;
+			if ((dec_state & dec_upd) == 0)
+			{
+				dec_state = (dec_upd + dec_run) | (value >> 31);
+				std::thread (&SPUThread::decrementer_thread , this).detach();
+			}
+			else dec_state = (dec_upd + dec_run) | (value >> 31);
+		}
 		return true;
 	}
 
@@ -1512,8 +1541,16 @@ bool SPUThread::set_ch_value(u32 ch, u32 value)
 
 	case SPU_WrEventAck:
 	{
-
 		ch_event_stat &= ~value;
+
+		if (dec_state & dec_run) 
+		{
+			if (value & SPU_EVENT_TM && ch_event_mask & SPU_EVENT_TM == 0 )
+			{
+				ch_dec_value -= (u32)(get_timebased_time() - ch_dec_start_timestamp);
+				dec_state = ch_dec_value >> 31; //save the value of msb and stop the decrementer.
+			}
+		}
 		return true;
 	}
 
