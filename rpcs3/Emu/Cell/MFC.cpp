@@ -157,6 +157,8 @@ void mfc_thread::cpu_task()
 
 					if ((cmd.cmd & ~(MFC_BARRIER_MASK | MFC_FENCE_MASK)) == MFC_PUTQLLUC_CMD)
 					{
+						bool is_lost = spu.raddr && cmd.eal == spu.raddr;
+
 						auto& data = vm::ps3::_ref<decltype(spu.rdata)>(cmd.eal);
 						const auto to_write = spu._ref<decltype(spu.rdata)>(cmd.lsa & 0x3ffff);
 
@@ -184,6 +186,11 @@ void mfc_thread::cpu_task()
 							data = to_write;
 							vm::reservation_update(cmd.eal, 128);
 							vm::notify(cmd.eal, 128);
+						}
+						if (is_lost)
+						{
+							spu.raddr = 0;
+							spu.set_events(SPU_EVENT_LR);
 						}
 					}
 					else if (cmd.cmd & MFC_LIST_MASK)

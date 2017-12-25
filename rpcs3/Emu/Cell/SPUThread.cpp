@@ -1027,6 +1027,7 @@ void SPUThread::decrementer_thread()
 		{
 			if (dec_state == 0x6) // Run + upd and msb switched from 0 -> 1
 			{
+				dec_state &= ~dec_upd;
 				set_events(SPU_EVENT_TM);
 				break;
 			}
