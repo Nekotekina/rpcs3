@@ -56,6 +56,7 @@ void spu_interpreter::set_interrupt_status(SPUThread& spu, spu_opcode_t op)
 
 	if (spu.ch_event_stat & SPU_EVENT_AVAILABLE && spu.interrupts_enabled)
 	{
+		LOG_FATAL(SPU, "interrupt dab ;) ch_event_mask = %x ch_event_stat = %x " , spu.ch_event_mask.load() , spu.ch_event_stat.load());
 		spu.interrupts_enabled = false;
 		spu.srr0 = std::exchange(spu.pc, -4) + 4;
 	}
@@ -395,12 +396,12 @@ void spu_interpreter::BISLED(SPUThread& spu, spu_opcode_t op)
 {
 	const u32 target = spu_branch_target(spu.gpr[op.ra]._u32[3]) ;
 	spu.gpr[op.rt] = v128::from32r(spu_branch_target(spu.pc + 4)) ;
-	
+
 	if (spu.ch_event_stat & SPU_EVENT_AVAILABLE)
 	{
 	 	spu.pc = target - 4;
-		set_interrupt_status(spu, op); 
-	} 
+		set_interrupt_status(spu, op);
+	}
 }
 
 void spu_interpreter::HBR(SPUThread& spu, spu_opcode_t op)

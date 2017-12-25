@@ -996,15 +996,15 @@ u32 SPUThread::get_events(bool waiting)
 }
 
 void SPUThread::set_events(u32 mask)
-{	
-	// Assume: only one event is set at a time 
+{
+	// Assume: only one event is set at a time
 	u32 counter = 0;
-	
+
 	if (mask & ~ch_event_stat)
 	{
 		if (ch_event_mask & mask )
 		{
-			if (ch_event_stat & SPU_EVENT_WAITING) 
+			if (ch_event_stat & SPU_EVENT_WAITING)
 			{
 				ch_event_stat |= mask | SPU_EVENT_OCCUR;
 			}
@@ -1018,11 +1018,11 @@ void SPUThread::set_events(u32 mask)
 void SPUThread::decrementer_thread()
 {
 	// SPU Decrementer Event
-	u32 current = ch_dec_value; 
+	u32 current = ch_dec_value;
 	do {
 		if (current > 20000000 /*second / 4*/) std::this_thread::sleep_for(std::chrono::milliseconds(200));
 		_mm_mfence();
-		
+
 		if ((current = ch_dec_value - (u32)(get_timebased_time() - ch_dec_start_timestamp)) >> 31)
 		{
 			if (dec_state == 0x6) // Run + upd and msb switched from 0 -> 1
@@ -1188,7 +1188,7 @@ bool SPUThread::get_ch_value(u32 ch, u32& out)
 			ch_event_stat &= 0x1fffffff;
 			return true;
 		}
-		ch_event_stat |= SPU_EVENT_WAITING; 
+		ch_event_stat |= SPU_EVENT_WAITING;
 		vm::waiter waiter;
 
 		if (ch_event_mask & SPU_EVENT_LR)
@@ -1201,7 +1201,7 @@ bool SPUThread::get_ch_value(u32 ch, u32& out)
 			waiter.init();
 		}
 		// Waits on SPU_EVENT_OCCUR to be set
-		while (get_events(true)) 
+		while (get_events(true))
 		{
 			if (test(state & cpu_flag::stop))
 			{
@@ -1537,10 +1537,11 @@ bool SPUThread::set_ch_value(u32 ch, u32 value)
 	case SPU_WrEventMask:
 	{
 		value &= 0x1ffb;
-		
+
 		// Check if new old disabled pending events are now enabled
 		if (ch_event_stat & (value & ~ch_event_mask)) ch_event_stat |= SPU_EVENT_AVAILABLE;
 
+		LOG_FATAL(SPU, "write event mask ch_event_mask = %x ch_event_stat = %x interrupts_enabled = %d" , ch_event_mask.load() , ch_event_stat.load(), interrupts_enabled.load());
 		ch_event_mask = value;
 		return true;
 	}
@@ -1553,7 +1554,7 @@ bool SPUThread::set_ch_value(u32 ch, u32 value)
 		// Check if enabled and pending events are still pending
 		if (ch_event_stat & ch_event_mask) ch_event_stat |= SPU_EVENT_AVAILABLE;
 
-		if (dec_state & dec_run) 
+		if (dec_state & dec_run)
 		{
 			if (value & SPU_EVENT_TM && ch_event_mask & SPU_EVENT_TM == 0 )
 			{
