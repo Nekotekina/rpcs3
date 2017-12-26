@@ -157,6 +157,8 @@ void mfc_thread::cpu_task()
 
 					if ((cmd.cmd & ~(MFC_BARRIER_MASK | MFC_FENCE_MASK)) == MFC_PUTQLLUC_CMD)
 					{
+						bool is_lost = spu.raddr && cmd.eal == spu.raddr;
+
 						auto& data = vm::ps3::_ref<decltype(spu.rdata)>(cmd.eal);
 						const auto to_write = spu._ref<decltype(spu.rdata)>(cmd.lsa & 0x3ffff);
 
@@ -184,6 +186,11 @@ void mfc_thread::cpu_task()
 							data = to_write;
 							vm::reservation_update(cmd.eal, 128);
 							vm::notify(cmd.eal, 128);
+						}
+						if (is_lost)
+						{
+							spu.raddr = 0;
+							spu.set_events(SPU_EVENT_LR);
 						}
 					}
 					else if (cmd.cmd & MFC_LIST_MASK)
@@ -230,13 +237,7 @@ void mfc_thread::cpu_task()
 								{
 									spu.ch_stall_mask |= (1 << cmd.tag);
 									spu.ch_stall_stat.push_or(spu, 1 << cmd.tag);
-
-									const u32 evt = spu.ch_event_stat.fetch_or(SPU_EVENT_SN);
-
-									if (evt & SPU_EVENT_WAITING)
-									{
-										spu.notify();
-									}
+									spu.set_events(SPU_EVENT_SN);
 									break;
 								}
 							}
@@ -307,6 +308,37 @@ void mfc_thread::cpu_task()
 					no_updates = 0;
 				}
 			}
+ 		
+			if (spu.prxy_type)
+ 			{
+ 				// Mask incomplete transfers
+ 				u32 completed = spu.mfc_prxy_mask;
+ 
+ 				for (u32 i = 0; i < spu.mfc_proxy.size(); i++)
+ 				{
+ 					const auto& _cmd = spu.mfc_proxy[i];
+ 
+ 					if (_cmd.size)
+ 					{
+ 						if (spu.prxy_type == 1)
+ 						{
+ 							completed &= ~(1u << _cmd.tag);
+ 						}
+ 						else
+ 						{
+ 							completed = 0;
+ 							break;
+ 						}
+ 					}
+ 				}
+ 
+ 				if (completed && spu.prxy_type)
+ 				{
+					spu.prxy_type = 0;
+ 					spu.int_ctrl[2].set(SPU_INT2_STAT_DMA_TAG_GROUP_COMPLETION_INT);
+  					no_updates = 0;
+  				}
+  			}
 
 			test_state();
 		}
@@ -340,7 +372,7 @@ void mfc_thread::cpu_task()
 						}
 					}
 
-					if (spu.ch_tag_upd)
+					if (spu.ch_tag_upd || spu.prxy_type)
 					{
 						no_updates = 0;
 						break;

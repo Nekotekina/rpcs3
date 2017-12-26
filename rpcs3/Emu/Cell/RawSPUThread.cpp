@@ -14,7 +14,7 @@ void RawSPUThread::cpu_task()
 	// get next PC and SPU Interrupt status
 	pc = npc.exchange(0);
 
-	set_interrupt_status((pc & 1) != 0);
+	interrupts_enabled = (pc & 1) != 0;
 
 	pc &= 0x3fffc;
 
@@ -62,7 +62,9 @@ bool RawSPUThread::read_reg(const u32 addr, u32& value)
 
 	case SPU_Out_MBox_offs:
 	{
+		bool is_written = ch_out_mbox.get_count();
 		value = ch_out_mbox.pop(*this);
+		if (is_written) set_events(SPU_EVENT_LE);
 		return true;
 	}
 
@@ -77,10 +79,33 @@ bool RawSPUThread::read_reg(const u32 addr, u32& value)
 		value = status;
 		return true;
 	}
+	case Prxy_QueryType_offs:
+ 	{
+ 		value = prxy_type;
+ 		return true;
+ 	}
 
 	case Prxy_TagStatus_offs:
 	{
-		value = mfc_proxy.size() ? 0 : +mfc_prxy_mask;
+		if (mfc_prxy_mask == 0 || mfc_proxy.size() == 0)
+ 		{
+ 			value = mfc_prxy_mask;
+ 		}
+ 		
+ 		else
+ 		{			
+ 			u32 completed = mfc_prxy_mask;
+ 
+ 			for (u32 i = 0; completed && i < mfc_proxy.size(); i++)
+ 			{
+ 				const auto& _cmd = mfc_proxy[i];
+ 				if (_cmd.size)
+ 				{
+ 					completed &= ~(1u << _cmd.tag);
+ 				}
+ 			}
+ 			value = completed ;
+ 		}
 		return true;
 	}
 
@@ -90,6 +115,19 @@ bool RawSPUThread::read_reg(const u32 addr, u32& value)
 		value = npc;
 		return true;
 	}
+	
+	case SPU_RdSigNotify1_offs:
+	{
+		get_ch_value(SPU_RdSigNotify1, value);
+		return true;
+	}
+
+	case SPU_RdSigNotify2_offs:
+	{
+		get_ch_value(SPU_RdSigNotify2, value);
+		return true;
+	}
+
 
 	case SPU_RunCntl_offs:
 	{
@@ -163,20 +201,29 @@ bool RawSPUThread::write_reg(const u32 addr, const u32 value)
 		
 	case Prxy_QueryType_offs:
 	{
-		// TODO
-		// 0 - no query requested; cancel previous request
-		// 1 - set (interrupt) status upon completion of any enabled tag groups
-		// 2 - set (interrupt) status upon completion of all enabled tag groups
-
 		if (value > 2)
-		{
-			break;
-		}
-
+  		{
+ 			break;
+ 		}
+		
 		if (value)
-		{
-			int_ctrl[2].set(SPU_INT2_STAT_DMA_TAG_GROUP_COMPLETION_INT); // TODO
-		}
+  		{
+			if (mfc_prxy_mask == 0 || mfc_proxy.size()  == 0)
+			{
+				int_ctrl[2].set(SPU_INT2_STAT_DMA_TAG_GROUP_COMPLETION_INT); // TODO
+			}
+			else 
+			{
+				prxy_type = value ;
+				auto mfc = fxm::check_unlocked<mfc_thread>();
+			
+				//if (test(mfc->state, cpu_flag::is_waiting))
+				{
+					mfc->notify();
+				}
+			}
+  		}
+ 		else prxy_type = 0;
 
 		return true;
 	}
@@ -189,7 +236,9 @@ bool RawSPUThread::write_reg(const u32 addr, const u32 value)
 
 	case SPU_In_MBox_offs:
 	{
+		bool is_written = ch_in_mbox.get_count();
 		ch_in_mbox.push(*this, value);
+		if (!is_written) set_events(SPU_EVENT_MB);
 		return true;
 	}
 

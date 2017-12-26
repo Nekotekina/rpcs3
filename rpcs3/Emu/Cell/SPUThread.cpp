@@ -22,6 +22,7 @@
 #include <cfenv>
 #include <atomic>
 #include <thread>
+#include <chrono>
 
 const bool s_use_rtm = utils::has_rtm();
 
@@ -336,6 +337,7 @@ void SPUThread::cpu_init()
 	ch_tag_upd = 0;
 	ch_tag_mask = 0;
 	mfc_prxy_mask = 0;
+	prxy_type = 0;
 	ch_tag_stat.data.store({});
 	ch_stall_mask = 0;
 	ch_stall_stat.data.store({});
@@ -358,6 +360,7 @@ void SPUThread::cpu_init()
 
 	ch_dec_start_timestamp = get_timebased_time(); // ???
 	ch_dec_value = 0;
+	dec_state = 0;
 
 	run_ctrl = 0;
 	status = 0;
@@ -455,6 +458,7 @@ void SPUThread::push_snr(u32 number, u32 value)
 	{
 		channel->push(*this, value);
 	}
+	set_events(SPU_EVENT_S1 >> number);
 }
 
 void SPUThread::do_dma_transfer(const spu_mfc_cmd& args, bool from_mfc)
@@ -658,7 +662,7 @@ void SPUThread::process_mfc_cmd()
 
 		if (raddr && raddr != ch_mfc_cmd.eal)
 		{
-			ch_event_stat |= SPU_EVENT_LR;
+			set_events(SPU_EVENT_LR);
 		}
 
 		const bool is_polling = false;// raddr == _addr && rtime == _time; // TODO
@@ -777,7 +781,7 @@ void SPUThread::process_mfc_cmd()
 
 		if (raddr && !result)
 		{
-			ch_event_stat |= SPU_EVENT_LR;
+			set_events(SPU_EVENT_LR);
 		}
 
 		raddr = 0;
@@ -787,8 +791,8 @@ void SPUThread::process_mfc_cmd()
 	{
 		if (raddr && ch_mfc_cmd.eal == raddr)
 		{
-			ch_event_stat |= SPU_EVENT_LR;
 			raddr = 0;
+			set_events(SPU_EVENT_LR);
 		}
 
 		auto& data = vm::ps3::_ref<decltype(rdata)>(ch_mfc_cmd.eal);
@@ -983,65 +987,54 @@ u32 SPUThread::get_events(bool waiting)
 	// Check reservation status and set SPU_EVENT_LR if lost
 	if (raddr && (vm::reservation_acquire(raddr, sizeof(rdata)) != rtime || rdata != vm::ps3::_ref<decltype(rdata)>(raddr)))
 	{
-		ch_event_stat |= SPU_EVENT_LR;
 		raddr = 0;
-	}
-
-	// SPU Decrementer Event
-	if (!ch_dec_value || (ch_dec_value - (get_timebased_time() - ch_dec_start_timestamp)) >> 31)
-	{
-		if ((ch_event_stat & SPU_EVENT_TM) == 0)
-		{
-			ch_event_stat |= SPU_EVENT_TM;
-		}
+		set_events(SPU_EVENT_LR);
 	}
 
 	// Simple polling or polling with atomically set/removed SPU_EVENT_WAITING flag
-	return !waiting ? ch_event_stat & ch_event_mask : ch_event_stat.atomic_op([&](u32& stat) -> u32
-	{
-		if (u32 res = stat & ch_event_mask)
-		{
-			stat &= ~SPU_EVENT_WAITING;
-			return res;
-		}
-
-		stat |= SPU_EVENT_WAITING;
-		return 0;
-	});
+	return !waiting ? ch_event_stat & ch_event_mask : ch_event_stat & SPU_EVENT_OCCUR != 0;
 }
 
 void SPUThread::set_events(u32 mask)
 {
-	if (u32 unimpl = mask & ~SPU_EVENT_IMPLEMENTED)
-	{
-		fmt::throw_exception("Unimplemented events (0x%x)" HERE, unimpl);
-	}
+	// Assume: only one event is set at a time
+	u32 counter = 0;
 
-	// Set new events, get old event mask
-	const u32 old_stat = ch_event_stat.fetch_or(mask);
-
-	// Notify if some events were set
-	if (~old_stat & mask && old_stat & SPU_EVENT_WAITING && ch_event_stat & SPU_EVENT_WAITING)
+	if (mask & ~ch_event_stat)
 	{
+		if (ch_event_mask & mask )
+		{
+			if (ch_event_stat & SPU_EVENT_WAITING)
+			{
+				ch_event_stat |= mask | SPU_EVENT_OCCUR;
+			}
+			else ch_event_stat |= mask | SPU_EVENT_AVAILABLE;
+		}
+		else ch_event_stat |= mask;
 		notify();
 	}
 }
 
-void SPUThread::set_interrupt_status(bool enable)
+void SPUThread::decrementer_thread()
 {
-	if (enable)
-	{
-		// detect enabling interrupts with events masked
-		if (u32 mask = ch_event_mask & ~SPU_EVENT_INTR_IMPLEMENTED)
+	// SPU Decrementer Event
+	u32 current = ch_dec_value;
+	do {
+		if (current > 20000000 /*second / 4*/) std::this_thread::sleep_for(std::chrono::milliseconds(200));
+		_mm_mfence();
+
+		if ((current = ch_dec_value - (u32)(get_timebased_time() - ch_dec_start_timestamp)) >> 31)
 		{
-			fmt::throw_exception("SPU Interrupts not implemented (mask=0x%x)" HERE, mask);
+			if (dec_state == 0x6) // Run + upd and msb switched from 0 -> 1
+			{
+				dec_state &= ~dec_upd;
+				set_events(SPU_EVENT_TM);
+				break;
+			}
+			dec_state |= dec_msb;
 		}
-		interrupts_enabled = true;
-	}
-	else
-	{
-		interrupts_enabled = false;
-	}
+		else dec_state &= ~dec_msb;
+	} while (dec_state & dec_upd || !test(state & cpu_flag::stop));
 }
 
 u32 SPUThread::get_ch_count(u32 ch)
@@ -1055,11 +1048,11 @@ u32 SPUThread::get_ch_count(u32 ch)
 	case SPU_RdInMbox:        return ch_in_mbox.get_count();
 	case MFC_RdTagStat:       return ch_tag_stat.get_count();
 	case MFC_RdListStallStat: return ch_stall_stat.get_count();
-	case MFC_WrTagUpdate:     return ch_tag_upd == 0;
+	case MFC_WrTagUpdate:     return ch_tag_stat.get_count() ? 1 : ch_tag_upd != 0;
 	case SPU_RdSigNotify1:    return ch_snr1.get_count();
 	case SPU_RdSigNotify2:    return ch_snr2.get_count();
 	case MFC_RdAtomicStat:    return ch_atomic_stat.get_count();
-	case SPU_RdEventStat:     return get_events() != 0;
+	case SPU_RdEventStat:     return ch_event_stat & SPU_EVENT_AVAILABLE != 0;
 	case MFC_Cmd:             return std::max(16 - mfc_queue.size(), (u32)0);
 	}
 
@@ -1171,7 +1164,7 @@ bool SPUThread::get_ch_value(u32 ch, u32& out)
 
 	case SPU_RdDec:
 	{
-		out = ch_dec_value - (u32)(get_timebased_time() - ch_dec_start_timestamp);
+		out = dec_state & dec_run ? (ch_dec_value - (u32)(get_timebased_time() - ch_dec_start_timestamp)) : ch_dec_value;
 
 		//Polling: We might as well hint to the scheduler to slot in another thread since this one is counting down
 		if (g_cfg.core.spu_loop_detection && out > spu::scheduler::native_jiffy_duration_us)
@@ -1188,14 +1181,14 @@ bool SPUThread::get_ch_value(u32 ch, u32& out)
 
 	case SPU_RdEventStat:
 	{
-		u32 res = get_events();
-
-		if (res)
+		u32 res = get_events(false);
+		if (ch_event_stat & SPU_EVENT_AVAILABLE)
 		{
 			out = res;
+			ch_event_stat &= 0x1fffffff;
 			return true;
 		}
-
+		ch_event_stat |= SPU_EVENT_WAITING;
 		vm::waiter waiter;
 
 		if (ch_event_mask & SPU_EVENT_LR)
@@ -1207,8 +1200,8 @@ bool SPUThread::get_ch_value(u32 ch, u32& out)
 			waiter.data = rdata.data();
 			waiter.init();
 		}
-
-		while (!(res = get_events(true)))
+		// Waits on SPU_EVENT_OCCUR to be set
+		while (get_events(true))
 		{
 			if (test(state & cpu_flag::stop))
 			{
@@ -1218,7 +1211,8 @@ bool SPUThread::get_ch_value(u32 ch, u32& out)
 			thread_ctrl::wait_for(100);
 		}
 
-		out = res;
+		ch_event_stat &= 0x1fffffff;
+		out = ch_event_stat & ch_event_mask;
 		return true;
 	}
 
@@ -1520,37 +1514,54 @@ bool SPUThread::set_ch_value(u32 ch, u32 value)
 
 	case SPU_WrDec:
 	{
-		ch_dec_start_timestamp = get_timebased_time();
-		ch_dec_value = value;
+		if ((value & ~(dec_state & dec_run ? (ch_dec_value - (u32)(get_timebased_time() - ch_dec_start_timestamp)) : ch_dec_value)) >> 31)
+		{
+			ch_dec_start_timestamp = get_timebased_time();
+			ch_dec_value = value;
+			dec_state = dec_msb + dec_run;
+			set_events(SPU_EVENT_TM);
+		}
+		else {
+			ch_dec_start_timestamp = get_timebased_time();
+			ch_dec_value = value;
+			if ((dec_state & dec_upd) == 0)
+			{
+				dec_state = (dec_upd + dec_run) | (value >> 31);
+				std::thread (&SPUThread::decrementer_thread , this).detach();
+			}
+			else dec_state = (dec_upd + dec_run) | (value >> 31);
+		}
 		return true;
 	}
 
 	case SPU_WrEventMask:
 	{
-		// detect masking events with enabled interrupt status
-		if (value & ~SPU_EVENT_INTR_IMPLEMENTED && interrupts_enabled)
-		{
-			fmt::throw_exception("SPU Interrupts not implemented (mask=0x%x)" HERE, value);
-		}
+		value &= 0x1ffb;
 
-		// detect masking unimplemented events
-		if (value & ~SPU_EVENT_IMPLEMENTED)
-		{
-			break;
-		}
+		// Check if new old disabled pending events are now enabled
+		if (ch_event_stat & (value & ~ch_event_mask)) ch_event_stat |= SPU_EVENT_AVAILABLE;
 
+		LOG_FATAL(SPU, "write event mask ch_event_mask = %x ch_event_stat = %x interrupts_enabled = %d" , ch_event_mask.load() , ch_event_stat.load(), interrupts_enabled.load());
 		ch_event_mask = value;
 		return true;
 	}
 
 	case SPU_WrEventAck:
 	{
-		if (value & ~SPU_EVENT_IMPLEMENTED)
-		{
-			break;
-		}
-
+		value &= 0x1ffb;
 		ch_event_stat &= ~value;
+
+		// Check if enabled and pending events are still pending
+		if (ch_event_stat & ch_event_mask) ch_event_stat |= SPU_EVENT_AVAILABLE;
+
+		if (dec_state & dec_run)
+		{
+			if (value & SPU_EVENT_TM && ch_event_mask & SPU_EVENT_TM == 0 )
+			{
+				ch_dec_value -= (u32)(get_timebased_time() - ch_dec_start_timestamp);
+				dec_state = ch_dec_value >> 31; //save the value of msb and stop the decrementer.
+			}
+		}
 		return true;
 	}
 

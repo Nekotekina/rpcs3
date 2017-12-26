@@ -9,3 +9,8 @@
 namespace vm { using namespace ps3; }
 
 logs::channel sys_dbg("sys_dbg");
+
+void sys_dbg_get_console_type(vm::ptr<u64> Console_Type)
+{
+	*Console_Type = 1; // CEX console
+}
